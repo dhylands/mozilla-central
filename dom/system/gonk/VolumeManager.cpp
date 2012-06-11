@@ -8,6 +8,7 @@
 #include <sys/socket.h>
 
 #include "base/message_loop.h"
+#include "mozilla/Scoped.h"
 #include "nsWhitespaceTokenizer.h"
 #include "nsXULAppAPI.h"
 
@@ -22,6 +23,8 @@ namespace mozilla {
 namespace system {
 
 static RefPtr<VolumeManager> sVolumeManager;
+
+#define TEST_VOLUME_OBSERVER  0
 
 /***************************************************************************/
 
@@ -397,6 +400,29 @@ VolumeManager::Start()
                       1000);
   }
 }
+#if TEST_VOLUME_OBSERVER
+class TestVolumeEventObserver : public VolumeEventObserver
+{
+public:
+  virtual void Notify(const Volume::ChangedEvent &aEvent)
+  {
+    const Volume *vol = aEvent.GetVolume();
+    LOG("Volume Changed event '%s' state %s mountpoint %s",
+        vol->NameStr(), vol->StateStr(), vol->MountPoint().get());
+  }
+};
+
+static TestVolumeEventObserver sTestVolumeEventObserver;
+static MessageLoop *sVolumeObserverTestThread;
+
+static void
+TestVolumeObserver()
+{
+  LOG("%s: About to call RegisterVolumeEventObserver", __FUNCTION__ );
+  RegisterVolumeEventObserver(NS_LITERAL_CSTRING("sdcard"),
+                              &sTestVolumeEventObserver);
+}
+#endif // TEST_VOLUME_OBSERVER
 
 /***************************************************************************/
 
@@ -408,6 +434,12 @@ InitVolumeManagerIOThread()
 
   sVolumeManager = new VolumeManager();
   VolumeManager::Start();
+
+#if TEST_VOLUME_OBSERVER
+  sVolumeObserverTestThread->PostTask(
+     FROM_HERE,
+     NewRunnableFunction(TestVolumeObserver));
+#endif
 }
 
 static void
@@ -416,6 +448,102 @@ ShutdownVolumeManagerIOThread()
   MOZ_ASSERT(MessageLoop::current() == XRE_GetIOMessageLoop());
 
   sVolumeManager = NULL;
+}
+
+class VolumeEventObserverProxy : public Volume::EventObserver
+{
+public:
+  VolumeEventObserverProxy(VolumeEventObserver *aRemoteObserver)
+    : mRemoteObserver(aRemoteObserver) {}
+
+  virtual void Notify(const Volume::ChangedEvent &aEvent);
+private:
+  VolumeEventObserver *mRemoteObserver;
+};
+
+// This notify function runs in the context of the thread which
+// called RegisterVolumeEventObserver
+static void
+NotifyVolumeEventRemoteThread(VolumeEventObserver *aRemoteObserver,
+                              Volume *aVolume)
+{
+  // aVolume is the cloned volume allocated in the IOThread.
+  // We introduce the RefPtr here (now that we're running on the
+  // remote thread) and it will free the memory.
+  RefPtr<Volume> volume(aVolume);
+  Volume::ChangedEvent remoteChangedEvent(volume);
+  aRemoteObserver->Notify(remoteChangedEvent);
+}
+
+// This Notify function runs in the IOThread
+void
+VolumeEventObserverProxy::Notify(const Volume::ChangedEvent &aEvent)
+{
+  MOZ_ASSERT(MessageLoop::current() == XRE_GetIOMessageLoop());
+
+  if (!mRemoteObserver) {
+    ERR("%s: No remote observer", __FUNCTION__);
+    return;
+  }
+
+  // We're running in the IOThread. We need to do the real notification
+  // on the remote observers thread.
+  MessageLoop  *messageLoop = mRemoteObserver->GetMessageLoop();
+  if (!messageLoop) {
+    ERR("%s: No message loop", __FUNCTION__);
+    return;
+  }
+
+  // We don't want to send a RefPtr to the volume cross-thread (since there
+  // could be races when adjusting the reference count), so we create a
+  // copy and send the copy.
+  messageLoop->PostTask(
+      FROM_HERE,
+      NewRunnableFunction(NotifyVolumeEventRemoteThread, mRemoteObserver,
+                          aEvent.GetVolume()->Clone()));
+}
+
+static void
+RegisterVolumeEventObserverIOThread(nsCString * const &aVolumeName,
+                                    VolumeEventObserver * const &aRemoteObserver)
+{
+  ScopedFreePtr<nsCString> ioVolumeName(aVolumeName);
+
+  MOZ_ASSERT(MessageLoop::current() == XRE_GetIOMessageLoop());
+
+  // We use FindAddVolumeByName to cover the case where the caller wants to
+  // register for volume events before we've gotten the volume list back
+  // from vold. Once the VolumeManager gets the volume list, it also uses
+  // FindAddVolumeByName, so that way the order doesn't matter.
+  RefPtr<Volume>  volume = VolumeManager::FindAddVolumeByName(*ioVolumeName);
+  if (!volume) {
+    return;
+  }
+  ScopedFreePtr<Volume::EventObserver> proxyObserver(
+     new VolumeEventObserverProxy(aRemoteObserver));
+
+  aRemoteObserver->SetProxyObserver(proxyObserver);
+  volume->RegisterObserver(proxyObserver);
+  proxyObserver.forget();
+}
+
+static void
+UnregisterVolumeEventObserverIOThread(nsCString * const &aVolumeName,
+                                      Volume::EventObserver * const &aProxyObserver)
+{
+  ScopedFreePtr<nsCString> ioVolumeName(aVolumeName);
+  ScopedFreePtr<Volume::EventObserver> proxyObserver(aProxyObserver);
+
+  MOZ_ASSERT(MessageLoop::current() == XRE_GetIOMessageLoop());
+
+  if (!proxyObserver) {
+    return;
+  }
+  RefPtr<Volume>  volume = VolumeManager::FindVolumeByName(*ioVolumeName);
+  if (!volume) {
+    return;
+  }
+  volume->UnregisterObserver(proxyObserver);
 }
 
 /**************************************************************************
@@ -430,6 +558,10 @@ ShutdownVolumeManagerIOThread()
 void
 InitVolumeManager()
 {
+#if TEST_VOLUME_OBSERVER
+  sVolumeObserverTestThread = MessageLoop::current();
+#endif
+
   XRE_GetIOMessageLoop()->PostTask(
       FROM_HERE,
       NewRunnableFunction(InitVolumeManagerIOThread));
@@ -441,6 +573,39 @@ ShutdownVolumeManager()
   XRE_GetIOMessageLoop()->PostTask(
       FROM_HERE,
       NewRunnableFunction(ShutdownVolumeManagerIOThread));
+}
+
+void
+RegisterVolumeEventObserver(const nsACString &aVolumeName,
+                            VolumeEventObserver *aRemoteObserver)
+{
+  // We need to allocate a copy of the volumeName so that we can
+  // guarantee it stays in scope until the IOThread runs.
+  nsCString *ioVolumeName = new nsCString(aVolumeName);
+
+  aRemoteObserver->SetMessageLoop();
+  XRE_GetIOMessageLoop()->PostTask(
+      FROM_HERE,
+      NewRunnableFunction(RegisterVolumeEventObserverIOThread,
+                          ioVolumeName, aRemoteObserver));
+}
+
+void
+UnregisterVolumeEventObserver(const nsACString &aVolumeName,
+                              VolumeEventObserver *aRemoteObserver)
+{
+  // We need to allocate a copy of the volumeName so that we can
+  // guarantee it stays in scope until the IOThread runs
+  nsCString *ioVolumeName = new nsCString(aVolumeName);
+
+  // We also can't be sure that the remote observer will stay
+  // in scope, so we grab the proxy and pass it instead.
+  Volume::EventObserver *proxyObserver = aRemoteObserver->GetProxyObserver();
+
+  XRE_GetIOMessageLoop()->PostTask(
+      FROM_HERE,
+      NewRunnableFunction(UnregisterVolumeEventObserverIOThread,
+                          ioVolumeName, proxyObserver));
 }
 
 } // system

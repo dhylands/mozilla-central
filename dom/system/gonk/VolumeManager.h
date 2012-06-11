@@ -177,6 +177,44 @@ void InitVolumeManager();
  */
 void ShutdownVolumeManager();
 
+/**
+ * Class for observing volume events on remote (i.e.
+ * non-IOThread threads).
+ */
+class VolumeEventObserver : public Volume::EventObserver
+{
+public:
+  VolumeEventObserver()
+    : mMessageLoop(0),
+      mProxyObserver(0)
+  {}
+
+  MessageLoop *GetMessageLoop() const { return mMessageLoop; }
+  void SetMessageLoop() { mMessageLoop = MessageLoop::current(); }
+
+  Volume::EventObserver *GetProxyObserver() const { return mProxyObserver; }
+  void SetProxyObserver(Volume::EventObserver *aObserver) { mProxyObserver = aObserver; }
+
+private:
+    MessageLoop *mMessageLoop;
+    Volume::EventObserver *mProxyObserver;
+};
+
+/**
+ * Register an observer which gets called whenever the indicated
+ * volume changes.
+ *
+ * This function can be called from any thread.
+ */
+void RegisterVolumeEventObserver(const nsACString &aName, VolumeEventObserver *aObserver);
+
+/**
+ * Unregister a previously registered volume event observer.
+ *
+ * This function can be called from any thread.
+ */
+void UnregisterVolumeEventObserver(const nsACString &aName, VolumeEventObserver *aObserver);
+
 } // system
 } // mozilla
 

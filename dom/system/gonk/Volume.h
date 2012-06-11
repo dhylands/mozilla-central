@@ -5,6 +5,7 @@
 #ifndef mozilla_system_volume_h__
 #define mozilla_system_volume_h__
 
+#include "mozilla/Observer.h"
 #include "mozilla/RefPtr.h"
 #include "nsString.h"
 #include "VolumeCommand.h"
@@ -67,6 +68,30 @@ public:
   // (i.e. path that leads to the files stored on the volume).
   const nsCString &MountPoint() const { return mMountPoint; }
 
+  class ChangedEvent
+  {
+  public:
+    ChangedEvent(Volume *aVolume) :mVolume(aVolume) {}
+    const Volume *GetVolume() const { return mVolume; }
+  private:
+    Volume *mVolume;
+  };
+
+  typedef mozilla::Observer<ChangedEvent>     EventObserver;
+  typedef mozilla::ObserverList<ChangedEvent> EventObserverList;
+
+  // NOTE: that observers must live in the IOThread.
+  void RegisterObserver(EventObserver *aObserver);
+  void UnregisterObserver(EventObserver *aObserver);
+
+  // Create a copy which doesn't share any data with the original
+  Volume *Clone() const;
+
+private:
+  friend class AutoMounter;         // Calls StartXxx
+  friend class VolumeManager;       // Calls SetState
+  friend class VolumeListCallback;  // Calls SetMountPoint, SetState
+
   // The StartXxx functions will queue up a command to the VolumeManager.
   // You can queue up as many commands as you like, and aCallback will
   // be called as each one completes.
@@ -75,18 +100,14 @@ public:
   void StartShare(VolumeResponseCallback *aCallback);
   void StartUnshare(VolumeResponseCallback *aCallback);
 
-private:
-  friend class VolumeManager;       // Calls SetState
-  friend class VolumeListCallback;  // Calls SetMountPoint, SetState
-
   void SetState(STATE aNewState);
   void SetMountPoint(const nsCSubstring &aMountPoint);
   void StartCommand(VolumeCommand *aCommand);
 
   STATE             mState;
   const nsCString   mName;
-
   nsCString         mMountPoint;
+  EventObserverList mEventObserverList;
 };
 
 } // system
