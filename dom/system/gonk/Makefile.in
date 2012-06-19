@@ -27,6 +27,7 @@ XPIDLSRCS = \
   nsIAudioManager.idl \
   nsINetworkManager.idl \
   nsIRadioInterfaceLayer.idl \
+  nsIVolume.idl \
   nsIWorkerHolder.idl \
   $(NULL)
 

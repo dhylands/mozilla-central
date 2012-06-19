@@ -2,6 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include "nsCOMPtr.h"
+#include "nsIVolume.h"
+#include "nsXULAppAPI.h"
+
 #include "Volume.h"
 #include "VolumeCommand.h"
 #include "VolumeManager.h"
@@ -9,6 +13,53 @@
 
 namespace mozilla {
 namespace system {
+
+class nsVolume : public nsIVolume
+{
+public:
+  NS_DECL_ISUPPORTS
+  NS_DECL_NSIVOLUME
+
+  nsVolume(nsAString &aName, nsAString &aMount, const long aState);
+
+private:
+  ~nsVolume();
+
+protected:
+  nsString mName;
+  nsString mMount;
+  long mState;
+};
+
+NS_IMPL_THREADSAFE_ISUPPORTS1(nsVolume, nsIVolume)
+
+nsVolume::nsVolume(nsAString &aName, nsAString &aMount, const long aState)
+  :mName(aName), mMount(aMount), mState(aState)
+{
+}
+
+nsVolume::~nsVolume()
+{
+}
+
+NS_IMETHODIMP nsVolume::GetName(nsAString & aName)
+{
+  aName = mName;
+  return NS_OK;
+}
+
+NS_IMETHODIMP nsVolume::GetMountPoint(nsAString & aMountPoint)
+{
+  aMountPoint = mMount;
+  return NS_OK;
+}
+
+NS_IMETHODIMP nsVolume::GetState(PRInt32 *aState)
+{
+  *aState = mState;
+  return NS_OK;
+}
+
 
 Volume::Volume(const nsCSubstring &aName)
   : mState(STATE_INIT),
@@ -66,6 +117,13 @@ Volume::StartUnshare(VolumeResponseCallback *aCallback)
 void
 Volume::StartCommand(VolumeCommand *aCommand)
 {
+#if 0
++  NS_ConvertUTF8toUTF16 name(mName);
++  NS_ConvertUTF8toUTF16 mount(mMountPoint);
++  nsCOMPtr<nsIVolume> v = new nsVolume(name, mount, mState);
++  printf("nsVolume = %p\n", v.get());
++
+#endif
   VolumeManager::PostCommand(aCommand);
 }
 
